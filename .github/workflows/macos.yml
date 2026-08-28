@@ -1,0 +1,41 @@
+name: Build Rainy for macOS
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build Rainy
+        run: |
+          pyinstaller --windowed --name Rainy --icon=icon.png main.py
+
+      - name: Create ZIP
+        run: |
+          cd dist
+          zip -r Rainy-macOS.zip Rainy.app
+
+      - name: Upload macOS build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Rainy-macOS
+          path: dist/Rainy-macOS.zip
