@@ -1,5 +1,7 @@
 # Imports
 import sys
+import subprocess
+import json
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -9,19 +11,43 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QMessageBox,
     QSpinBox,
+    QCheckBox,
     QHBoxLayout
 )
 
-from PySide6.QtCore import QTimer ,Qt ,QDateTime
+from PySide6.QtCore import QTimer ,Qt ,QDateTime ,QUrl
 from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtWidgets import QDialog, QFormLayout 
+from PySide6.QtMultimedia import QSoundEffect
+from pathlib import Path
 
 # Variables
 seconds = 0
 time_running = False
-mode = "focus"
+mode = "Focus"
 session_started = False
 session_count = 1
 end_time = None
+session_before_long_break = 3
+long_break_duration = 15
+lb_count = 0
+button_pressed_sound_rule = True
+send_notification_rule = True
+auto_start_focus = False
+auto_start_break = False
+
+#Paths
+def resource_path(relative_path):
+    if getattr(sys, "frozen", False):
+        base_path = Path(sys._MEIPASS)
+    else:
+        base_path = Path(__file__).resolve().parent
+
+    return base_path / relative_path
+
+BASE_DIR = Path(__file__).resolve().parent
+ICON_PATH = resource_path("icon.png")
+SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
 
 # Functions
 
@@ -32,44 +58,70 @@ def switch_session():
     global session_count
     global mode
     global end_time
+    global lb_count
+    global session_before_long_break
 
     end_time = None
 
-    if mode == "focus":
-        QMessageBox.information(
-            window,
-            "Focus Complete",
-            "Time for a Break",
-        )
-        mode = "break"
-        mode_label.setText("Break")
+    if mode == "Focus":
+        focus_end_sound.play()
+        lb_count += 1
+
+        if lb_count % session_before_long_break == 0:
+            mode = "Long_Break"
+            mode_label.setText("Long Break")
+            start_button.setText("Take a long break")
+        else:
+            mode = "Break"
+            mode_label.setText("Break")
+            start_button.setText("Take a break")
+        
+        if mode == "Break":
+            send_notification_rule_func(
+                    "Focus Complete",
+                    "Time for a Break"
+                )
+            if auto_start_break:
+                toggle_focus()
+        else:
+            send_notification_rule_func(
+                    "Focus Complete",
+                    "Time for a Long Break"
+                )
+            if auto_start_break:
+                toggle_focus()
+
+
         value_changer()
         update_display()
-        start_button.setText("Take a break")
 
     else:
-        QMessageBox.information(
-            window,
-            "Break Complete",
-            "Time to Lock In",
-        )
-        mode = "focus"
+        break_end_sound.play()
+        send_notification_rule_func(
+                "Break Complete",
+                "Time to Lock In"
+            )
+
+        mode = "Focus"
         session_count += 1
         session_label.setText(f"Session #{session_count}")
-        mode_label.setText("Focus")
+        mode_label.setText(mode)
         value_changer()
         update_display()
         start_button.setText("Start Focus")
+        if auto_start_focus:
+            toggle_focus()
 
 def value_changer():
     global mode
     global seconds
 
-    if mode == "focus":
+    if mode == "Focus":
         seconds = focus_input.value() * 60
-    else:
+    elif mode == "Break":
         seconds = break_input.value() * 60
-    
+    else:
+        seconds = long_break_duration * 60
 
 def update_timer():
     global seconds
@@ -146,7 +198,12 @@ def stop_func():
     value_changer()
     update_display()
 
-    start_button.setText("Start Focus" if mode == "focus" else "Take a break")
+    if mode == "Focus":
+        start_button.setText("Start Focus")
+    elif mode == "Break":
+        start_button.setText("Take a break")
+    elif mode == "Long_Break":
+        start_button.setText("Take a long break")
 
 def reset_focus():
     global seconds
@@ -155,6 +212,7 @@ def reset_focus():
     global session_started
     global session_count
     global end_time
+    global lb_count
 
     timer.stop()
     end_time = None
@@ -162,7 +220,8 @@ def reset_focus():
     time_running = False
     session_started = False
     session_count = 1
-    mode = "focus"
+    lb_count = 0
+    mode = "Focus"
 
     seconds = focus_input.value() * 60
 
@@ -172,14 +231,212 @@ def reset_focus():
     mode_label.setText("Focus")
     start_button.setText("Start Focus")
 
+def open_settings():
+    global long_break_duration
+    global session_before_long_break
+    global send_notification_rule
+
+    settings_window = QDialog(window)
+    settings_window.setWindowTitle("Rainy Settings")
+    settings_window.setFixedSize(300, 250)
+
+    layout = QFormLayout()
+
+    #Inputs
+    long_break_spinbox = QSpinBox()
+    long_break_spinbox.setRange(1,120)
+    long_break_spinbox.setValue(long_break_duration)
+
+    session_before_lb_spinbox = QSpinBox()
+    session_before_lb_spinbox.setRange(1,6)
+    session_before_lb_spinbox.setValue(session_before_long_break)
+
+    button_pressed_sound_rule_cb = QCheckBox()
+    button_pressed_sound_rule_cb.setChecked(button_pressed_sound_rule)
+    
+    send_notification_rule_cb = QCheckBox()
+    send_notification_rule_cb.setChecked(send_notification_rule)
+
+    auto_start_focus_cb = QCheckBox()
+    auto_start_focus_cb.setChecked(auto_start_focus)
+
+    auto_start_break_cb = QCheckBox()
+    auto_start_break_cb.setChecked(auto_start_break)
+
+    save_button = QPushButton("Save 💾")
+
+    layout.addRow("Long Break:", long_break_spinbox)
+    layout.addRow("Long Break Limit:", session_before_lb_spinbox)
+    layout.addRow("Sound on button press", button_pressed_sound_rule_cb)
+    layout.addRow("Send Notifications", send_notification_rule_cb)
+    layout.addRow("Auto start Focus:", auto_start_focus_cb)
+    layout.addRow("Auto start Break:", auto_start_break_cb)
+    layout.addRow("Save:", save_button)
+
+    def save_settings():
+        global long_break_duration
+        global session_before_long_break
+        global button_pressed_sound_rule
+        global send_notification_rule
+        global auto_start_focus
+        global auto_start_break
+
+        long_break_duration = long_break_spinbox.value()
+        session_before_long_break = session_before_lb_spinbox.value()
+        button_pressed_sound_rule = button_pressed_sound_rule_cb.isChecked()
+        send_notification_rule = send_notification_rule_cb.isChecked()
+        auto_start_focus = auto_start_focus_cb.isChecked()
+        auto_start_break = auto_start_break_cb.isChecked()
+
+        save_user_settings()
+
+        if not time_running:
+            value_changer()
+            update_display()
+
+        
+
+        settings_window.close()
+
+    save_button.clicked.connect(save_settings)
+
+    settings_window.setLayout(layout)
+    settings_window.exec()
+
+def debug_timer():
+    global seconds
+    global session_started
+    global end_time
+    global time_running
+
+    timer.stop()
+
+    seconds = 5
+    session_started = True
+    time_running = False
+    end_time = None
+
+    update_display()
+    start_button.setText("Start")
+
+def button_pressed():
+    if button_pressed_sound_rule:
+        button_pressed_sound.play()
+
+def send_notif(title, message):
+    subprocess.run([
+        "notify-send",
+        "--app-name=Rainy",
+        f"--icon={ICON_PATH}",
+        title,
+        message
+    ])
+
+def send_notification_rule_func(title, message):
+    if send_notification_rule:
+        send_notif(
+            title,
+            message,
+        )
+    else:
+        QMessageBox.information(
+            window,
+            title,
+            message,
+        )
+
+def save_user_settings():
+    settings = {
+        "focus_duration" : focus_input.value(),
+        "break_duration" : break_input.value(),
+        "long_break_duration" : long_break_duration,
+        "session_before_long_break" : session_before_long_break,
+        "button_pressed_sound_rule" : button_pressed_sound_rule,
+        "send_notifications_rule" : send_notification_rule,
+        "auto_start_focus_rule" : auto_start_focus,
+        "auto_start_break_rule" : auto_start_break,
+    }
+
+    with open(SETTINGS_FILE, "w") as file:
+        json.dump(settings, file, indent=4)
+
+def load_settings():
+    global focus_input
+    global break_input
+    global long_break_duration
+    global session_before_long_break
+    global button_pressed_sound_rule
+    global send_notification_rule
+    global auto_start_focus
+    global auto_start_break
+
+    if not SETTINGS_FILE.exists():
+        return
+
+    with open(SETTINGS_FILE, "r") as file:
+        settings = json.load(file)
+
+        focus_input.setValue(
+            settings.get("focus_duration", 25)
+        )
+
+        break_input.setValue(
+            settings.get("break_duration", 5)
+        )
+
+        long_break_duration = settings.get(
+            "long_break_duration", 15
+        )
+
+        session_before_long_break = settings.get(
+            "session_before_long_break", 3
+        )
+
+        button_pressed_sound_rule = settings.get(
+            "button_pressed_sound_rule", True
+        )
+
+        send_notification_rule  = settings.get(
+            "send_notifications_rule", True
+        )
+
+        auto_start_focus = settings.get(
+            "auto_start_focus_rule", False
+        )
+
+        auto_start_break = settings.get(
+            "auto_start_break_rule", False
+        )
+
 
 # Application
 app = QApplication(sys.argv)
 
 
+
+#Sounds
+focus_end_sound = QSoundEffect()
+focus_end_sound.setSource(
+    QUrl.fromLocalFile(str(BASE_DIR/"sounds"/"focus_end.wav"))
+)
+focus_end_sound.setVolume(0.5)
+
+break_end_sound = QSoundEffect()
+break_end_sound.setSource(
+    QUrl.fromLocalFile(str(BASE_DIR/"sounds"/"break_end.wav"))
+)
+break_end_sound.setVolume(0.5)
+
+button_pressed_sound = QSoundEffect()
+button_pressed_sound.setSource(
+    QUrl.fromLocalFile(str(BASE_DIR/"sounds"/"button_pressed.wav"))
+)
+button_pressed_sound.setVolume(0.3)
+
+
+
 # Window
 window = QWidget()
-
 window.setStyleSheet("""
     QWidget {
             background-color: #202020;
@@ -189,6 +446,7 @@ window.setStyleSheet("""
 
 window.setWindowTitle("Rainy")
 window.resize(500, 400)
+
 
 
 # Widgets
@@ -201,14 +459,6 @@ title.setStyleSheet("""
 """)
 title.setAlignment(Qt.AlignCenter)
 
-settings_title = QLabel("Settings")
-settings_title.setAlignment(Qt.AlignCenter)
-settings_title.setStyleSheet("""
-    QLabel{
-        font-size: 15px;
-        font-weight: bold;
-    }
-""")
 
 mode_label = QLabel("Focus")
 mode_label.setStyleSheet("font-size: 40px;")
@@ -234,7 +484,7 @@ start_button.setStyleSheet("""
 """)
 start_button.setToolTip("Start or pause the timer")
 
-reset_button = QPushButton("Reset")
+reset_button = QPushButton("↻ Reset")
 reset_button.setStyleSheet("""
     QPushButton{
         font-size: 16px;
@@ -311,11 +561,34 @@ stop_button.setStyleSheet("""
 """)
 stop_button.setToolTip("Restart current session")
 
+settings_button = QPushButton("⚙️")
+#settings_button.setAlignment(Qt.AlignCenter)
+settings_button.setStyleSheet("""
+    QPushButton{
+        font-size: 10px;
+        padding: 10px;
+        border-radius: 16px;
+        max-width: 10px;
+        border: 1px solid #555555;
+    }
+""")
+
+debug_button = QPushButton("🐛 5s")
+debug_button.setToolTip("Set current timer to 5 seconds")
+
 
 #Connections
 start_button.clicked.connect(toggle_focus)
+start_button.clicked.connect(button_pressed)
+
 stop_button.clicked.connect(stop_func)
+stop_button.clicked.connect(button_pressed)
+
 reset_button.clicked.connect(reset_focus)
+reset_button.clicked.connect(button_pressed)
+
+settings_button.clicked.connect(open_settings)
+settings_button.clicked.connect(button_pressed)
 
 shortcut_space = QShortcut(QKeySequence("Space"), window)
 shortcut_space.activated.connect(toggle_focus)
@@ -323,9 +596,14 @@ shortcut_space.activated.connect(toggle_focus)
 focus_input.valueChanged.connect(settings_changed)
 break_input.valueChanged.connect(settings_changed)
 
+debug_button.clicked.connect(debug_timer)
+
+
+
 # Timer
 timer = QTimer()
 timer.timeout.connect(update_timer)
+
 
 
 # Layout
@@ -339,11 +617,14 @@ layout.setContentsMargins(50 ,40 , 50, 40)
 layout.setSpacing(15)
 
 
+layout.addWidget(settings_button)
 layout.addWidget(mode_label)
 layout.addWidget(session_label)
 layout.addWidget(title)
 
 layout.addWidget(start_button)
+
+#stopReset_layout.addWidget(debug_button)
 stopReset_layout.addWidget(stop_button)
 stopReset_layout.addWidget(reset_button)
 
@@ -357,7 +638,6 @@ break_layout.addWidget(break_input)
 settings_layout.addLayout(focus_layout)
 settings_layout.addLayout(break_layout)
 
-layout.addWidget(settings_title)
 layout.addLayout(settings_layout)
 
 layout.addStretch()
@@ -376,6 +656,8 @@ window.setStyleSheet("""
         color: white;
     }
 """)
+
+load_settings()
 
 
 # Run
