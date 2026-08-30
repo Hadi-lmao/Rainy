@@ -45,9 +45,22 @@ def resource_path(relative_path):
 
     return base_path / relative_path
 
-BASE_DIR = Path(__file__).resolve().parent
+def settings_path():
+    if sys.platform == "win32":
+        settings_dir = Path.home() / "AppData" / "Roaming" / "Rainy"
+
+    elif sys.platform == "darwin":
+        settings_dir = Path.home() / "Library" / "Application Support" / "Rainy"
+
+    else:
+        settings_dir = Path.home() / ".config" / "Rainy"
+
+    settings_dir.mkdir(parents=True, exist_ok=True)
+
+    return settings_dir / "settings.json"
+
 ICON_PATH = resource_path("icon.png")
-SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
+SETTINGS_FILE = settings_path()
 
 # Functions
 
@@ -324,13 +337,36 @@ def button_pressed():
         button_pressed_sound.play()
 
 def send_notif(title, message):
-    subprocess.run([
-        "notify-send",
-        "--app-name=Rainy",
-        f"--icon={ICON_PATH}",
-        title,
-        message
-    ])
+    if sys.platform == "linux":
+        subprocess.run([
+            "notify-send",
+            "--app-name=Rainy",
+            f"--icon={ICON_PATH}",
+            title,
+            message
+        ])
+
+    elif sys.platform == "win32":
+        subprocess.run([
+            "powershell",
+            "-Command",
+            f'''
+            Add-Type -AssemblyName System.Windows.Forms
+            $notification = New-Object System.Windows.Forms.NotifyIcon
+            $notification.Icon = [System.Drawing.SystemIcons]::Information
+            $notification.Visible = $true
+            $notification.ShowBalloonTip(5000, "{title}", "{message}", "Info")
+            Start-Sleep -Seconds 5
+            $notification.Dispose()
+            '''
+        ])
+
+    elif sys.platform == "darwin":
+        subprocess.run([
+            "osascript",
+            "-e",
+            f'display notification "{message}" with title "{title}"'
+        ])
 
 def send_notification_rule_func(title, message):
     if send_notification_rule:
@@ -361,8 +397,6 @@ def save_user_settings():
         json.dump(settings, file, indent=4)
 
 def load_settings():
-    global focus_input
-    global break_input
     global long_break_duration
     global session_before_long_break
     global button_pressed_sound_rule
@@ -373,40 +407,43 @@ def load_settings():
     if not SETTINGS_FILE.exists():
         return
 
-    with open(SETTINGS_FILE, "r") as file:
-        settings = json.load(file)
+    try:
+        with open(SETTINGS_FILE, "r") as file:
+            settings = json.load(file)
+    except (json.JSONDecodeError, OSError):
+        return
 
-        focus_input.setValue(
-            settings.get("focus_duration", 25)
-        )
+    focus_input.setValue(
+        settings.get("focus_duration", 25)
+    )
 
-        break_input.setValue(
-            settings.get("break_duration", 5)
-        )
+    break_input.setValue(
+        settings.get("break_duration", 5)
+    )
 
-        long_break_duration = settings.get(
-            "long_break_duration", 15
-        )
+    long_break_duration = settings.get(
+        "long_break_duration", 15
+    )
 
-        session_before_long_break = settings.get(
-            "session_before_long_break", 3
-        )
+    session_before_long_break = settings.get(
+        "session_before_long_break", 3
+    )
 
-        button_pressed_sound_rule = settings.get(
-            "button_pressed_sound_rule", True
-        )
+    button_pressed_sound_rule = settings.get(
+        "button_pressed_sound_rule", True
+    )
 
-        send_notification_rule  = settings.get(
-            "send_notifications_rule", True
-        )
+    send_notification_rule  = settings.get(
+        "send_notifications_rule", True
+    )
 
-        auto_start_focus = settings.get(
-            "auto_start_focus_rule", False
-        )
+    auto_start_focus = settings.get(
+        "auto_start_focus_rule", False
+    )
 
-        auto_start_break = settings.get(
-            "auto_start_break_rule", False
-        )
+    auto_start_break = settings.get(
+        "auto_start_break_rule", False
+    )
 
 
 # Application
@@ -417,19 +454,19 @@ app = QApplication(sys.argv)
 #Sounds
 focus_end_sound = QSoundEffect()
 focus_end_sound.setSource(
-    QUrl.fromLocalFile(str(BASE_DIR/"sounds"/"focus_end.wav"))
+    QUrl.fromLocalFile(str(resource_path("sounds/focus_end.wav")))
 )
 focus_end_sound.setVolume(0.5)
 
 break_end_sound = QSoundEffect()
 break_end_sound.setSource(
-    QUrl.fromLocalFile(str(BASE_DIR/"sounds"/"break_end.wav"))
+    QUrl.fromLocalFile(str(resource_path("sounds/break_end.wav")))
 )
 break_end_sound.setVolume(0.5)
 
 button_pressed_sound = QSoundEffect()
 button_pressed_sound.setSource(
-    QUrl.fromLocalFile(str(BASE_DIR/"sounds"/"button_pressed.wav"))
+    QUrl.fromLocalFile(str(resource_path("sounds/button_pressed.wav")))
 )
 button_pressed_sound.setVolume(0.3)
 
