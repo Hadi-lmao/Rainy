@@ -12,12 +12,15 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QSpinBox,
     QCheckBox,
-    QHBoxLayout
+    QHBoxLayout,
+    QDialog,
+    QFormLayout,
+    QSystemTrayIcon,
+    QMenu
 )
 
 from PySide6.QtCore import QTimer ,Qt ,QDateTime ,QUrl
-from PySide6.QtGui import QShortcut, QKeySequence
-from PySide6.QtWidgets import QDialog, QFormLayout 
+from PySide6.QtGui import QShortcut, QKeySequence, QIcon
 from PySide6.QtMultimedia import QSoundEffect
 from pathlib import Path
 
@@ -35,6 +38,7 @@ button_pressed_sound_rule = True
 send_notification_rule = True
 auto_start_focus = False
 auto_start_break = False
+tray_rule = False
 
 #Paths
 def resource_path(relative_path):
@@ -276,6 +280,9 @@ def open_settings():
     auto_start_break_cb = QCheckBox()
     auto_start_break_cb.setChecked(auto_start_break)
 
+    tray_cb = QCheckBox()
+    tray_cb.setChecked(tray_rule)
+
     save_button = QPushButton("Save 💾")
 
     layout.addRow("Long Break:", long_break_spinbox)
@@ -284,6 +291,7 @@ def open_settings():
     layout.addRow("Send Notifications", send_notification_rule_cb)
     layout.addRow("Auto start Focus:", auto_start_focus_cb)
     layout.addRow("Auto start Break:", auto_start_break_cb)
+    layout.addRow("Minimize to system tray when closed:", tray_cb)
     layout.addRow("Save:", save_button)
 
     def save_settings():
@@ -293,6 +301,7 @@ def open_settings():
         global send_notification_rule
         global auto_start_focus
         global auto_start_break
+        global tray_rule
 
         long_break_duration = long_break_spinbox.value()
         session_before_long_break = session_before_lb_spinbox.value()
@@ -300,6 +309,7 @@ def open_settings():
         send_notification_rule = send_notification_rule_cb.isChecked()
         auto_start_focus = auto_start_focus_cb.isChecked()
         auto_start_break = auto_start_break_cb.isChecked()
+        tray_rule = tray_cb.isChecked()
 
         save_user_settings()
 
@@ -347,19 +357,27 @@ def send_notif(title, message):
         ])
 
     elif sys.platform == "win32":
-        subprocess.run([
-            "powershell",
-            "-Command",
-            f'''
-            Add-Type -AssemblyName System.Windows.Forms
-            $notification = New-Object System.Windows.Forms.NotifyIcon
-            $notification.Icon = [System.Drawing.SystemIcons]::Information
-            $notification.Visible = $true
-            $notification.ShowBalloonTip(5000, "{title}", "{message}", "Info")
-            Start-Sleep -Seconds 5
-            $notification.Dispose()
-            '''
-        ])
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        subprocess.run(
+            [
+                "powershell",
+                "-Command",
+                f'''
+                Add-Type -AssemblyName System.Windows.Forms
+                Add-Type -AssemblyName System.Drawing
+                $notification = New-Object System.Windows.Forms.NotifyIcon
+                $notification.Icon = [System.Drawing.SystemIcons]::Information
+                $notification.Visible = $true
+                $notification.ShowBalloonTip(5000, "{title}", "{message}", "Info")
+                Start-Sleep -Seconds 5
+                $notification.Dispose()
+                '''
+            ],
+            startupinfo=startupinfo,
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
 
     elif sys.platform == "darwin":
         subprocess.run([
@@ -391,6 +409,7 @@ def save_user_settings():
         "send_notifications_rule" : send_notification_rule,
         "auto_start_focus_rule" : auto_start_focus,
         "auto_start_break_rule" : auto_start_break,
+        "tray_rule" : tray_rule,
     }
 
     with open(SETTINGS_FILE, "w") as file:
@@ -403,6 +422,7 @@ def load_settings():
     global send_notification_rule
     global auto_start_focus
     global auto_start_break
+    global tray_rule
 
     if not SETTINGS_FILE.exists():
         return
@@ -445,6 +465,24 @@ def load_settings():
         "auto_start_break_rule", False
     )
 
+    tray_rule = settings.get(
+        "tray_rule", False
+    )
+
+
+def show_window():
+    window.showNormal()
+    window.raise_()
+    window.activatedWindow()
+
+#Classes
+class RainyWindow(QWidget):
+    def closeEvent(self, event):
+        if tray_rule:
+            event.ignore()
+            self.hide()
+        else:
+            event.accept()
 
 # Application
 app = QApplication(sys.argv)
@@ -473,7 +511,7 @@ button_pressed_sound.setVolume(0.3)
 
 
 # Window
-window = QWidget()
+window = RainyWindow()
 window.setStyleSheet("""
     QWidget {
             background-color: #202020;
@@ -484,6 +522,7 @@ window.setStyleSheet("""
 window.setWindowTitle("Rainy")
 window.resize(500, 400)
 
+window.setWindowIcon(QIcon(str(ICON_PATH)))
 
 
 # Widgets
@@ -599,7 +638,6 @@ stop_button.setStyleSheet("""
 stop_button.setToolTip("Restart current session")
 
 settings_button = QPushButton("⚙️")
-#settings_button.setAlignment(Qt.AlignCenter)
 settings_button.setStyleSheet("""
     QPushButton{
         font-size: 10px;
@@ -661,7 +699,7 @@ layout.addWidget(title)
 
 layout.addWidget(start_button)
 
-#stopReset_layout.addWidget(debug_button)
+stopReset_layout.addWidget(debug_button)
 stopReset_layout.addWidget(stop_button)
 stopReset_layout.addWidget(reset_button)
 
@@ -696,8 +734,47 @@ window.setStyleSheet("""
 
 load_settings()
 
+#System tray
+tray_icon = QSystemTrayIcon(window)
+tray_icon.setIcon(window.windowIcon())
+tray_icon.setToolTip("Rainy")
+
+tray_menu = QMenu()
+open_action = tray_menu.addAction("Open Rainy")
+start_pause_action = tray_menu.addAction("Start or Pause")
+stop_action = tray_menu.addAction("Stop")
+reset_action = tray_menu.addAction("Reset")
+
+tray_menu.addSeparator()
+
+quit_action = tray_menu.addAction("Quit")
+
+tray_icon.setContextMenu(tray_menu)
+
+#tray_icon.activated.connect()
+
+open_action.triggered.connect(show_window)
+open_action.triggered.connect(button_pressed)
+
+start_pause_action.triggered.connect(toggle_focus)
+start_pause_action.triggered.connect(button_pressed)
+
+stop_action.triggered.connect(stop_func)
+stop_action.triggered.connect(button_pressed)
+
+reset_action.triggered.connect(reset_focus)
+reset_action.triggered.connect(button_pressed)
+
+quit_action.triggered.connect(app.quit)
+quit_action.triggered.connect(button_pressed)
+
+if tray_rule:
+    tray_icon.show()
+
 
 # Run
 window.show()
 
+
+#Close
 sys.exit(app.exec())
