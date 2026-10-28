@@ -2,7 +2,6 @@
 import sys
 import subprocess
 import json
-
 from PySide6.QtWidgets import (
     QApplication,
     QWidget,
@@ -16,13 +15,28 @@ from PySide6.QtWidgets import (
     QDialog,
     QFormLayout,
     QSystemTrayIcon,
-    QMenu
+    QMenu,
+    QScrollArea,    
+    QFrame,
+    QLineEdit,
+    QTextEdit
 )
-
+from PySide6.QtCharts import (
+    QChart,
+    QChartView,
+    QBarSeries,
+    QBarSet,
+    QPieSeries,
+    QPieSlice,
+    QBarCategoryAxis,
+    QValueAxis,
+)
 from PySide6.QtCore import QTimer ,Qt ,QDateTime ,QUrl
-from PySide6.QtGui import QShortcut, QKeySequence, QIcon
+from PySide6.QtGui import QShortcut, QKeySequence, QIcon, QPainter
 from PySide6.QtMultimedia import QSoundEffect
 from pathlib import Path
+import database
+from datetime import datetime
 
 # Variables
 seconds = 0
@@ -39,6 +53,14 @@ send_notification_rule = True
 auto_start_focus = False
 auto_start_break = False
 tray_rule = False
+
+# Activity tracking
+activity_name = ""
+activity_description = ""
+activity_focus_seconds = 0
+activity_focus_periods = 0
+activity_breaks_completed = 0
+activity_started_at = None
 
 #Paths
 def resource_path(relative_path):
@@ -65,6 +87,9 @@ def settings_path():
 
 ICON_PATH = resource_path("icon.png")
 SETTINGS_FILE = settings_path()
+DATABASE_FILE = SETTINGS_FILE.with_name("rainy.db")
+
+database.initialize_database(DATABASE_FILE)
 
 # Functions
 
@@ -77,12 +102,17 @@ def switch_session():
     global end_time
     global lb_count
     global session_before_long_break
+    global activity_focus_periods
+    global activity_focus_seconds
+    global activity_breaks_completed
 
     end_time = None
 
     if mode == "Focus":
         focus_end_sound.play()
         lb_count += 1
+        activity_focus_seconds += focus_input.value() * 60
+        activity_focus_periods += 1
 
         if lb_count % session_before_long_break == 0:
             mode = "Long_Break"
@@ -113,6 +143,7 @@ def switch_session():
         update_display()
 
     else:
+        activity_breaks_completed += 1
         break_end_sound.play()
         send_notification_rule_func(
                 "Break Complete",
@@ -177,29 +208,32 @@ def settings_changed():
 
         update_display()
 
+
 def toggle_focus():
-    global time_running
-    global seconds
-    global session_started
-    global end_time
+    global time_running, seconds, session_started, end_time, activity_started_at
 
     if time_running:
         timer.stop()
         time_running = False
         start_button.setText("Resume")
-    
+
     else:
         if not session_started:
-            value_changer()
+            if mode == "Focus" and activity_started_at is None:
+                activity_started_at = datetime.now().isoformat(
+                    timespec="seconds"
+                )
 
+            value_changer()
             update_display()
             session_started = True
-        
+
         end_time = QDateTime.currentDateTime().addSecs(seconds)
 
         timer.start(250)
         time_running = True
         start_button.setText("Pause")
+
     
 def stop_func():
     global time_running
@@ -247,6 +281,301 @@ def reset_focus():
     session_label.setText(f"Session #{session_count}")
     mode_label.setText("Focus")
     start_button.setText("Start Focus")
+
+def finish_activity():
+    global activity_name, activity_description, activity_focus_seconds, activity_focus_periods, activity_breaks_completed, activity_started_at
+
+    if activity_focus_periods == 0:
+        QMessageBox.information(
+            window,
+            "No Activity",
+            "Complete at least one focus period before saving an activity."
+        )
+        return
+
+    dialog = QDialog(window)
+    dialog.setWindowTitle("Finish Activity")
+    dialog.setMinimumWidth(350)
+
+    layout = QVBoxLayout(dialog)
+
+    layout.addWidget(QLabel("What did you work on?"))
+
+    name_input = QLineEdit()
+    name_input.setPlaceholderText("e.g. Physics - Electrostatics")
+    layout.addWidget(name_input)
+
+    layout.addWidget(QLabel("Description (optional)"))
+
+    description_input = QTextEdit()
+    description_input.setPlaceholderText(
+        "Describe what you worked on..."
+    )
+    description_input.setFixedHeight(100)
+    layout.addWidget(description_input)
+
+    layout.addWidget(QLabel(
+        f"Focus periods: {activity_focus_periods} | "
+        f"Breaks: {activity_breaks_completed}"
+    ))
+
+    buttons = QHBoxLayout()
+    save_button = QPushButton("Save Activity")
+    cancel_button = QPushButton("Cancel")
+
+    buttons.addWidget(cancel_button)
+    buttons.addWidget(save_button)
+    layout.addLayout(buttons)
+
+    cancel_button.clicked.connect(dialog.reject)
+
+    def save():
+        global activity_name, activity_description, activity_focus_seconds, activity_focus_periods, activity_breaks_completed, activity_started_at
+
+        name = name_input.text().strip()
+
+        if not name:
+            QMessageBox.warning(
+                dialog,
+                "Missing Name",
+                "Please enter an activity name."
+            )
+            return
+
+        activity_name = name
+        activity_description = description_input.toPlainText().strip()
+        started_at = activity_started_at or datetime.now().isoformat(
+            timespec="seconds"
+        )
+        database.save_activity(
+            DATABASE_FILE,
+            activity_name,
+            activity_description,
+            activity_focus_seconds,
+            activity_focus_periods,
+            activity_breaks_completed,
+            started_at,
+            datetime.now().isoformat(timespec="seconds"),
+        )
+
+        activity_name = ""
+        activity_description = ""
+        activity_focus_seconds = 0
+        activity_focus_periods = 0
+        activity_breaks_completed = 0
+        activity_started_at = None
+
+        QMessageBox.information(
+            dialog,
+            "Activity Saved",
+            f"'{name}' was saved successfully!"
+        )
+        dialog.accept()
+
+    save_button.clicked.connect(save)
+    dialog.exec()
+
+def create_daily_focus_chart():
+    daily_data = database.get_daily_focus(DATABASE_FILE)
+
+    chart = QChart()
+    chart.setTitle("Daily Focus Time")
+    chart.setAnimationOptions(QChart.AnimationOption.SeriesAnimations)
+    chart.setBackgroundRoundness(12)
+    chart.setBackgroundBrush(
+    window.palette().window()
+    )
+
+    chart.setTitleBrush(
+        window.palette().windowText()
+    )
+
+    bar_set = QBarSet("Focus Time (minutes)")
+
+    categories = []
+
+    for day, minutes in daily_data:
+        categories.append(day)
+        bar_set.append(minutes)
+
+    series = QBarSeries()
+    series.append(bar_set)
+    chart.addSeries(series)
+
+    axis_x = QBarCategoryAxis()
+    axis_x.append(categories)
+    chart.addAxis(axis_x, Qt.AlignmentFlag.AlignBottom)
+    series.attachAxis(axis_x)
+
+    axis_y = QValueAxis()
+    axis_y.setTitleText("Minutes")
+    axis_y.setLabelFormat("%d")
+    axis_y.setMin(0)
+    axis_y.setMax(max(
+        (minutes for _, minutes in daily_data),
+        default=60
+    ) + 10)
+    chart.addAxis(axis_y, Qt.AlignmentFlag.AlignLeft)
+    series.attachAxis(axis_y)
+
+    chart_view = QChartView(chart)
+    chart_view.setStyleSheet("background: transparent; border: none;")
+    chart_view.setBackgroundBrush(
+        window.palette().window()
+    )
+    chart_view.setRenderHint(
+        QPainter.RenderHint.Antialiasing
+    )
+
+    return chart_view
+
+def create_session_chart():
+    totals = database.get_session_totals(DATABASE_FILE)
+
+    chart = QChart()
+    chart.setTitle("Focus vs. Breaks")
+    chart.setBackgroundRoundness(12)
+    chart.setBackgroundBrush(window.palette().window())
+    chart.setTitleBrush(window.palette().windowText())
+
+    chart.legend().setLabelColor(
+        window.palette().windowText().color()
+    )
+
+    series = QPieSeries()
+
+    focus = totals["focus_periods"]
+    breaks = totals["breaks"]
+
+    if focus == 0 and breaks == 0:
+        return None
+
+    focus_slice = series.append(
+        f"Focus ({focus})",
+        focus
+    )
+
+    break_slice = series.append(
+        f"Breaks ({breaks})",
+        breaks
+    )
+
+    focus_slice.setLabelVisible(True)
+    break_slice.setLabelVisible(True)
+
+    text_color = window.palette().windowText().color()
+
+    focus_slice.setLabelColor(text_color)
+    break_slice.setLabelColor(text_color)
+
+    chart.addSeries(series)
+    chart.legend().setVisible(True)
+    chart.legend().setAlignment(
+        Qt.AlignmentFlag.AlignBottom
+    )
+
+    chart_view = QChartView(chart)
+    chart_view.setMinimumHeight(280)
+    chart_view.setRenderHint(
+        QPainter.RenderHint.Antialiasing
+    )
+
+    return chart_view
+
+def open_stats():
+    stats_window = QDialog(window)
+    stats_window.setWindowTitle("Your Stats")
+    stats_window.setMinimumSize(700, 800)
+
+    layout = QVBoxLayout(stats_window)
+
+    chart_container = QFrame()
+    chart_container.setObjectName("chartContainer")
+    chart_container.setStyleSheet("""
+        QFrame#chartContainer {
+            border: 1px solid palette(mid);
+            border-radius: 10px;
+        }
+    """)
+
+    chart_layout = QHBoxLayout(chart_container)
+    chart_layout.setContentsMargins(8, 8, 8, 8)
+
+    heading = QLabel("Activity History")
+    heading.setStyleSheet("font-size: 20px; font-weight: bold;")
+    layout.addWidget(heading)
+
+    activities = database.get_activities(DATABASE_FILE)
+
+    scroll_area = QScrollArea()
+    scroll_area.setWidgetResizable(True)
+    scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+
+    activity_container = QWidget()
+    activity_layout = QVBoxLayout(activity_container)
+    activity_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+    scroll_area.setWidget(activity_container)
+
+    if activities:
+        chart_view = create_daily_focus_chart()
+        chart_view.setMinimumHeight(300)
+        chart_layout.addWidget(chart_view)
+
+        session_chart = create_session_chart()
+        if session_chart is not None:
+            chart_layout.addWidget(session_chart)
+
+        layout.addWidget(chart_container)
+    else:
+        layout.addWidget(
+            QLabel("Complete an activity to see your focus chart!")
+        )
+
+    if not activities:
+        activity_layout.addWidget(
+            QLabel("No activities saved yet. Finish an activity to see it here!")
+        )
+    else:
+        for activity in activities:
+            activity_card = QFrame()
+            activity_card.setObjectName("activityCard")
+            activity_card.setStyleSheet("""
+                QFrame#activityCard {
+                    border: 1px solid palette(mid);
+                    border-radius: 12px;
+                    padding: 8px;
+                }
+            """)
+
+            card_layout = QVBoxLayout(activity_card)
+
+            name_label = QLabel(activity["activity_name"])
+            name_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+            card_layout.addWidget(name_label)
+
+            if activity["description"]:
+                description_label = QLabel(activity["description"])
+                description_label.setWordWrap(True)
+                card_layout.addWidget(description_label)
+
+            focus_minutes = activity["focus_seconds"] // 60
+
+            details_label = QLabel(
+                f"Focus time: {focus_minutes} minutes | "
+                f"Focus periods: {activity['focus_periods']} | "
+                f"Breaks: {activity['breaks_completed']}"
+            )
+            card_layout.addWidget(details_label)
+
+            date_label = QLabel(f"Completed: {activity['ended_at']}")
+            date_label.setStyleSheet("color: gray; font-size: 11px;")
+            card_layout.addWidget(date_label)
+
+            activity_layout.addWidget(activity_card)
+    layout.addWidget(scroll_area)
+    layout.addStretch()
+    stats_window.exec()
 
 def open_settings():
     global long_break_duration
@@ -334,7 +663,7 @@ def debug_timer():
 
     timer.stop()
 
-    seconds = 5
+    seconds = 2
     session_started = True
     time_running = False
     end_time = None
@@ -473,7 +802,7 @@ def load_settings():
 def show_window():
     window.showNormal()
     window.raise_()
-    window.activatedWindow()
+    window.activateWindow()
 
 #Classes
 class RainyWindow(QWidget):
@@ -486,8 +815,6 @@ class RainyWindow(QWidget):
 
 # Application
 app = QApplication(sys.argv)
-
-
 
 #Sounds
 focus_end_sound = QSoundEffect()
@@ -647,9 +974,42 @@ settings_button.setStyleSheet("""
         border: 1px solid #555555;
     }
 """)
+settings_button.setToolTip("Change settings")
 
-debug_button = QPushButton("🐛 5s")
+debug_button = QPushButton("🐛 2s")
 debug_button.setToolTip("Set current timer to 5 seconds")
+
+stats_button = QPushButton("📊")
+stats_button.setStyleSheet("""
+    QPushButton{
+        font-size: 10px;
+        padding: 10px;
+        border-radius: 16px;
+        max-width: 10px;
+        border: 1px solid #555555;
+    }
+""")
+stats_button.setToolTip("Peek at yout stats")
+
+finish_activity_button = QPushButton("Finish Activity")
+finish_activity_button.setToolTip("Finish your activity to save a record")
+finish_activity_button.setStyleSheet("""
+    QPushButton {
+        font-size: 16px;
+        padding: 8px;
+        border-radius: 10px;
+        min-width: 200px;
+        font-weight: bold;
+        background-color: #3a3a3a;
+        border: 1px solid #555555;
+    }
+    QPushButton:hover {
+        background-color: #4a4a4a;
+    }
+    QPushButton:pressed{
+        background-color: #2a2a2a;
+    }
+""")
 
 
 #Connections
@@ -673,6 +1033,8 @@ break_input.valueChanged.connect(settings_changed)
 
 debug_button.clicked.connect(debug_timer)
 
+stats_button.clicked.connect(open_stats)
+finish_activity_button.clicked.connect(finish_activity)
 
 
 # Timer
@@ -687,18 +1049,23 @@ layout = QVBoxLayout()
 focus_layout = QVBoxLayout()
 break_layout = QVBoxLayout()
 stopReset_layout = QHBoxLayout()
+button_layout = QHBoxLayout()
 
 layout.setContentsMargins(50 ,40 , 50, 40)
 layout.setSpacing(15)
 
+layout.addLayout(button_layout)
 
-layout.addWidget(settings_button)
-layout.addWidget(mode_label)
+button_layout.addWidget(settings_button)
+button_layout.addWidget(mode_label)
+button_layout.addWidget(stats_button)
+
 layout.addWidget(session_label)
 layout.addWidget(title)
 
 layout.addWidget(start_button)
 
+#stopReset_layout.addWidget(debug_button)
 stopReset_layout.addWidget(debug_button)
 stopReset_layout.addWidget(stop_button)
 stopReset_layout.addWidget(reset_button)
@@ -710,6 +1077,7 @@ layout.addLayout(stopReset_layout)
 break_layout.addWidget(break_label)
 break_layout.addWidget(break_input)
 
+layout.addWidget(finish_activity_button)
 settings_layout.addLayout(focus_layout)
 settings_layout.addLayout(break_layout)
 
